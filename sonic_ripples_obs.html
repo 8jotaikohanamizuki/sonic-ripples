@@ -14,6 +14,24 @@ canvas {
     display: block;
     background: transparent;
 }
+#startBtn {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    background: rgba(0, 240, 255, 0.15);
+    border: 1px solid rgba(0, 240, 255, 0.5);
+    color: rgba(0, 240, 255, 0.9);
+    font-family: monospace;
+    font-size: 1rem;
+    padding: 12px 28px;
+    cursor: pointer;
+    border-radius: 4px;
+    letter-spacing: 0.1em;
+}
+#startBtn:hover {
+    background: rgba(0, 240, 255, 0.25);
+}
 #status {
     position: absolute;
     bottom: 10px;
@@ -22,108 +40,27 @@ canvas {
     font-family: monospace;
     font-size: 0.7rem;
     z-index: 100;
+    display: none;
 }
 </style>
 </head>
 <body>
 
 <canvas id="canvas"></canvas>
-<div id="status">接続中...</div>
+<button id="startBtn">🎤 マイクで起動</button>
+<div id="status"></div>
 
 <script>
 const canvas = document.getElementById('canvas');
 const ctx = canvas.getContext('2d');
+const startBtn = document.getElementById('startBtn');
 const statusEl = document.getElementById('status');
 
 canvas.width = window.innerWidth;
 canvas.height = window.innerHeight;
 
 let ripples = [];
-
-// ── obs-websocket 設定 ──────────────────────────────────────
-const OBS_HOST = 'localhost';
-const OBS_PORT = 4455;
-
-// ── WebSocket接続 ────────────────────────────────────────────
-let ws;
-let reconnectTimer;
-
-function connect() {
-    ws = new WebSocket(`ws://${OBS_HOST}:${OBS_PORT}`);
-
-    ws.onopen = () => {
-        statusEl.textContent = 'OBS接続済み ✓';
-        setTimeout(() => statusEl.style.display = 'none', 3000);
-    };
-
-    ws.onmessage = (event) => {
-        const msg = JSON.parse(event.data);
-
-        // obs-websocket v5 のハンドシェイク
-        if (msg.op === 0) {
-            // Hello → Identify
-            ws.send(JSON.stringify({
-                op: 1,
-                d: { rpcVersion: 1 }
-            }));
-        }
-
-        if (msg.op === 2) {
-            // Identified → 音声レベルのサブスクライブ
-            ws.send(JSON.stringify({
-                op: 6,
-                d: {
-                    requestType: 'SetInputVolume',
-                    requestId: 'init'
-                }
-            }));
-
-            // InputVolumeMeters イベントを購読
-            ws.send(JSON.stringify({
-                op: 6,
-                d: {
-                    requestType: 'GetInputList',
-                    requestId: 'getInputs'
-                }
-            }));
-
-            // イベントサブスクリプション（音声メーター）
-            // EventSubscription: InputVolumeMeters = 1 << 17 = 131072
-            ws.send(JSON.stringify({
-                op: 1,
-                d: {
-                    rpcVersion: 1,
-                    eventSubscriptions: 131072
-                }
-            }));
-        }
-
-        // 音声メーターイベント
-        if (msg.op === 5 && msg.d.eventType === 'InputVolumeMeters') {
-            const inputs = msg.d.eventData.inputs;
-            inputs.forEach(input => {
-                if (input.inputLevelsMul && input.inputLevelsMul.length > 0) {
-                    // 音量レベル（0.0〜1.0）を取得
-                    const levels = input.inputLevelsMul[0];
-                    const peak = levels[1] || levels[0] || 0; // peak値
-                    const volume = peak * 255;
-                    maybeAddRipple(volume);
-                }
-            });
-        }
-    };
-
-    ws.onclose = () => {
-        statusEl.style.display = 'block';
-        statusEl.textContent = '再接続中...';
-        reconnectTimer = setTimeout(connect, 3000);
-    };
-
-    ws.onerror = () => {
-        statusEl.style.display = 'block';
-        statusEl.textContent = 'OBS接続エラー';
-    };
-}
+let analyser, dataArray;
 
 // ── 波紋生成 ─────────────────────────────────────────────────
 function maybeAddRipple(volume) {
@@ -139,6 +76,14 @@ function maybeAddRipple(volume) {
             color: `120, ${Math.floor(180 + power * 75)}, 255`
         });
     }
+}
+
+// ── 音声処理ループ ────────────────────────────────────────────
+function audioLoop() {
+    requestAnimationFrame(audioLoop);
+    analyser.getByteFrequencyData(dataArray);
+    const avg = dataArray.reduce((a, b) => a + b, 0) / dataArray.length;
+    maybeAddRipple(avg * 3.5);
 }
 
 // ── 描画ループ ────────────────────────────────────────────────
@@ -161,12 +106,34 @@ function draw() {
     }
 }
 
+// ── マイク起動 ────────────────────────────────────────────────
+startBtn.addEventListener('click', async () => {
+    try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+        const audioCtx = new AudioContext();
+        const source = audioCtx.createMediaStreamSource(stream);
+        analyser = audioCtx.createAnalyser();
+        analyser.fftSize = 256;
+        dataArray = new Uint8Array(analyser.frequencyBinCount);
+        source.connect(analyser);
+
+        startBtn.style.display = 'none';
+        statusEl.style.display = 'block';
+        statusEl.textContent = '🎤 マイク接続済み';
+        setTimeout(() => statusEl.style.display = 'none', 3000);
+
+        audioLoop();
+    } catch (e) {
+        statusEl.style.display = 'block';
+        statusEl.textContent = 'マイクアクセス失敗: ' + e.message;
+    }
+});
+
 window.addEventListener('resize', () => {
     canvas.width = window.innerWidth;
     canvas.height = window.innerHeight;
 });
 
-connect();
 draw();
 </script>
 
