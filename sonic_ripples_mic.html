@@ -79,11 +79,22 @@ function maybeAddRipple(volume) {
 }
 
 // ── 音声処理ループ ────────────────────────────────────────────
+let lastRippleTime = 0;
 function audioLoop() {
     requestAnimationFrame(audioLoop);
-    analyser.getByteFrequencyData(dataArray);
-    const avg = dataArray.reduce((a, b) => a + b, 0) / dataArray.length;
-    maybeAddRipple(avg * 3.5);
+    analyser.getByteTimeDomainData(dataArray);
+    // 瞬間ピーク検出（平均より速い）
+    let peak = 0;
+    for (let i = 0; i < dataArray.length; i++) {
+        const v = Math.abs(dataArray[i] - 128);
+        if (v > peak) peak = v;
+    }
+    const volume = peak * 2;
+    const now = performance.now();
+    if (now - lastRippleTime > 30) { // 30ms以上間隔をあける
+        maybeAddRipple(volume);
+        if (volume > 45) lastRippleTime = now;
+    }
 }
 
 // ── 描画ループ ────────────────────────────────────────────────
@@ -113,8 +124,8 @@ startBtn.addEventListener('click', async () => {
         const audioCtx = new AudioContext();
         const source = audioCtx.createMediaStreamSource(stream);
         analyser = audioCtx.createAnalyser();
-        analyser.fftSize = 256;
-        dataArray = new Uint8Array(analyser.frequencyBinCount);
+        analyser.fftSize = 64;
+        dataArray = new Uint8Array(analyser.fftSize);
         source.connect(analyser);
 
         startBtn.style.display = 'none';
