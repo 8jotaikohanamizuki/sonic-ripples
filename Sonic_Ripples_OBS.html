@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>TAKESHIBA: Voice Waves</title>
+<style>
+html, body {
+    margin: 0;
+    padding: 0;
+    background: transparent;
+    overflow: hidden;
+}
+canvas {
+    display: block;
+    background: transparent;
+}
+#overlay {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    text-align: center;
+    z-index: 100;
+    font-family: sans-serif;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    align-items: center;
+}
+button {
+    padding: 15px 30px;
+    font-size: 1rem;
+    background: rgba(0, 0, 0, 0.7);
+    border: 2px solid #00f0ff;
+    color: #00f0ff;
+    cursor: pointer;
+    backdrop-filter: blur(5px);
+    white-space: nowrap;
+}
+button:hover {
+    background: rgba(0, 240, 255, 0.15);
+}
+#status {
+    color: #888;
+    font-size: 0.75rem;
+    font-family: monospace;
+    margin-top: 8px;
+}
+</style>
+</head>
+<body>
+
+<div id="overlay">
+    <button id="startMic">🎤 マイクで起動</button>
+    <button id="startSystem">🔊 システム音声で起動（OBS推奨）</button>
+    <div id="status">音声ソースを選択してください</div>
+</div>
+
+<canvas id="canvas"></canvas>
+
+<script>
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+const overlay = document.getElementById('overlay');
+const statusEl = document.getElementById('status');
+
+canvas.width = window.innerWidth;
+canvas.height = window.innerHeight;
+
+let audioContext, analyser, dataArray;
+let ripples = [];
+let started = false;
+
+// ── OBSブラウザソース自動起動チェック ──────────────────────────
+// OBSのブラウザソースは window.obsstudio が存在する
+// URLパラメータ ?autostart=1 でボタンなしで自動起動できる
+function checkAutoStart() {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('autostart') === '1') {
+        // OBS環境ではシステム音声をキャプチャ試行
+        startAudio('system');
+    }
+}
+
+// ── マイク入力 ────────────────────────────────────────────────
+document.getElementById('startMic').addEventListener('click', () => startAudio('mic'));
+
+// ── システム音声（画面キャプチャ経由） ──────────────────────────
+document.getElementById('startSystem').addEventListener('click', () => startAudio('system'));
+
+async function startAudio(mode) {
+    try {
+        statusEl.textContent = '接続中...';
+        audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        analyser = audioContext.createAnalyser();
+        analyser.fftSize = 512;
+
+        let stream;
+
+        if (mode === 'mic') {
+            // 通常マイク
+            stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+
+        } else {
+            // システム音声: getDisplayMedia で画面共有の音声トラックを取得
+            // OBS Virtual Camera / 仮想マイク経由でも動作する
+            try {
+                stream = await navigator.mediaDevices.getDisplayMedia({
+                    audio: {
+                        echoCancellation: false,
+                        noiseSuppression: false,
+                        sampleRate: 44100
+                    },
+                    video: true  // 映像も要求しないとgetDisplayMediaが動かないブラウザ対応
+                });
+                // 映像トラックは不要なので停止
+                stream.getVideoTracks().forEach(t => t.stop());
+
+            } catch (displayErr) {
+                // getDisplayMedia が失敗した場合はマイクにフォールバック
+                statusEl.textContent = 'システム音声失敗 → マイクで再試行中...';
+                stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+            }
+        }
+
+        const source = audioContext.createMediaStreamSource(stream);
+        source.connect(analyser);
+        dataArray = new Uint8Array(analyser.frequencyBinCount);
+
+        overlay.style.display = 'none';
+        started = true;
+        draw();
+
+    } catch (err) {
+        statusEl.textContent = 'エラー: ' + err.message;
+        console.error(err);
+    }
+}
+
+// ── OBS WebAudio直接注入（OBSブラウザソースの場合） ─────────────
+// OBSのブラウザソースはページにAudioContextを自動注入しない。
+// しかしカスタムCSSやURLパラメータで volume を渡すことができる。
+// 以下は postMessage / BroadcastChannel 経由で外部から音量を受け取るフォールバック。
+const bc = new BroadcastChannel('obs_audio');
+bc.onmessage = (e) => {
+    if (e.data && typeof e.data.volume === 'number' && !started) {
+        // 外部スクリプトから音量を受け取って波紋生成
+        injectVolume(e.data.volume);
+    }
+};
+
+function injectVolume(volume) {
+    if (!started) {
+        if (!ripples) ripples = [];
+        maybeAddRipple(volume);
+        if (!animating) {
+            animating = true;
+            drawExternal();
+        }
+    }
+}
+
+let animating = false;
+function drawExternal() {
+    if (!started) {
+        requestAnimationFrame(drawExternal);
+        renderRipples();
+    }
+}
+
+// ── メイン描画ループ ──────────────────────────────────────────
+function draw() {
+    requestAnimationFrame(draw);
+    analyser.getByteFrequencyData(dataArray);
+
+    // 声帯域（中音域）を抽出
+    let sum = 0;
+    for (let i = 10; i < 80; i++) sum += dataArray[i];
+    let volume = sum / 70;
+
+    maybeAddRipple(volume);
+    renderRipples();
+}
+
+function maybeAddRipple(volume) {
+    if (volume > 45) {
+        let power = (volume - 45) / (255 - 45);
+        ripples.push({
+            x: canvas.width / 2,
+            y: canvas.height / 2,
+            r: 5,
+            opacity: 1,
+            lineWidth: 2 + (power * 12),
+            speed: 2 + (power * 12),
+            color: `120, ${Math.floor(180 + power * 75)}, 255`
+        });
+    }
+}
+
+function renderRipples() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    for (let i = ripples.length - 1; i >= 0; i--) {
+        const ripple = ripples[i];
+        ctx.beginPath();
+        ctx.arc(ripple.x, ripple.y, ripple.r, 0, Math.PI * 2);
+        ctx.strokeStyle = `rgba(${ripple.color}, ${ripple.opacity})`;
+        ctx.lineWidth = ripple.lineWidth;
+        ctx.stroke();
+
+        ripple.r += ripple.speed;
+        ripple.opacity -= 0.02;
+
+        if (ripple.opacity <= 0) ripples.splice(i, 1);
+    }
+}
+
+window.addEventListener('resize', () => {
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+});
+
+// ページ読み込み後に自動起動チェック
+window.addEventListener('load', checkAutoStart);
+</script>
+
+</body>
+</html>
